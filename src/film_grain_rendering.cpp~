@@ -1,0 +1,292 @@
+
+#include "libtiff_io.h"
+#include "pseudo_random_number_generator.h"
+#include "film_grain_rendering.h"
+#include "render_pixel.h"
+
+
+float grain_measure(std::string grainType, float grainRadius, float grainVar)
+{
+	if ( grainType == "disk")
+    	return(M_PI*(grainVar + grainRadius*grainRadius));
+	else if ( grainType == "triangle" )   //the (equilateral) triangle is described by its circumscribed circle
+	    return(3.0/4.0 * sqrt(3.0) * (grainRadius*grainRadius));
+	else if ( grainType == "square" )
+	    return(2*(grainRadius*grainRadius));
+	else
+	{
+		std::cout << "Error in grain_measure, unknown boolean model type." << std::endl;
+		return(-1);		
+	}
+}
+
+
+/**************************************************/
+/************    BOOLEAN MODEL INFO    ************/
+/**************************************************/
+
+matrix<float>* boolean_model(float lambda, float r, float stdGrain, std::string distributionType,
+			int xPixel, int yPixel, unsigned int offset)
+{
+
+    noise_prng p;
+    //draw the number of points from a Poisson distribution
+    /* seed cell = (x/w, y/w) */
+	unsigned int seed = cellseed(xPixel,yPixel, offset);
+	mysrand(&p, seed);
+
+	unsigned int nDots = my_rand_poisson(&p, lambda,-1);
+	matrix<float> * grainModelOut = new matrix<float>(nDots,4);
+
+	for (unsigned int i=0; i<nDots; i++)
+	{
+		grainModelOut->set_value(i,0,myrand_uniform_0_1(&p)-((float)1/2));
+		grainModelOut->set_value(i,1,myrand_uniform_0_1(&p)-((float)1/2));
+	}
+
+	//set radius of each grain
+    if ( distributionType == "constant")
+	{
+        for (unsigned int i=0; i<nDots; i++)
+		{
+			grainModelOut->set_value(i,2,r);
+		}
+	}
+    else if ( distributionType == "logNormal")
+	{
+        float sigmaSquare = log( (stdGrain/r)*(stdGrain/r) + 1);
+        float sigma = sqrt( sigmaSquare);
+        float mu = log(r)-sigmaSquare/(2.0);
+		std::lognormal_distribution<float> logDistribution(mu,sigma);
+
+		for (unsigned int i=0; i<nDots; i++)
+		{
+			grainModelOut->set_value(i,2,exp(mu + sigma*myrand_gaussian_0_1(&p)));
+		}
+	}
+	else
+	{
+		std::cout << "Error, unknown distribution" << std::endl;
+	}
+
+    return(grainModelOut);
+}
+
+
+/**************************************************/
+/************   PIXEL-WISE ALGORITHM   ************/
+/**************************************************/
+
+matrix<float>* film_grain_rendering_pixel_wise(matrix<float> *imgIn, filmGrainOptionsStruct<float> filmGrainOptions)
+{
+	/*********************************************/
+	/***************   PARAMETERS   **************/
+	/*********************************************/
+
+	//parameters for film grain
+    float grainRadius = filmGrainOptions.r;//grainRadius/pixelSize;
+    //grainRadius = sqrt((4*pi)/(3.0*sqrt(3.0)))*grainRadius;
+    float grainStd = filmGrainOptions.grainStd;
+	std::string grainType = filmGrainOptions.grainShape;
+	std::string distributionType = filmGrainOptions.grainDistribution;
+	float sigmaConv = filmGrainOptions.sigmaConv;
+
+	std::cout << "min : " << imgIn->min() << std::endl;
+	std::cout << "max : " << imgIn->max() << std::endl;
+
+	/*********************************************/
+	/***   MONTE CARLO TRANSLATION VECTORS   *****/
+	/*********************************************/
+
+	int NmonteCarlo = filmGrainOptions.NmonteCarlo;
+	std::random_device rd;
+    std::mt19937 rndGenerator(rd());
+
+	//draw the random (gaussian) translation vectors
+    matrix<float> * X = new matrix<float>(NmonteCarlo,1);
+    matrix<float> * Y = new matrix<float>(NmonteCarlo,1);
+	std::normal_distribution<float> normalDistribution(0.0,sigmaConv);
+	for (int i=0; i<NmonteCarlo; i++)
+	{
+		X->set_value(i,0,(float)normalDistribution(rndGenerator));
+		Y->set_value(i,0,(float)normalDistribution(rndGenerator));
+	}
+
+	//create list of temporary images, and set them to 0
+	matrix<float> *imgOut = new matrix<float>( filmGrainOptions.mOut, filmGrainOptions.nOut);
+	std::cout<< "image output size : " << imgOut->get_ncols() << " x " << imgOut->get_nrows() << std::endl;
+
+	unsigned int i,j;
+	float *ptrTemp,pixTemp;return(imgOut);
+	#pragma omp parallel for private(i,j,ptrTemp,pixTemp) shared(imgOut)
+	for (i=0; i<(unsigned int)imgOut->get_nrows(); i++)
+	{
+		for (j=0; j<(unsigned int)imgOut->get_ncols(); j++)
+		{
+			ptrTemp = (float*)imgIn->get_ptr();
+			pixTemp = render_pixel(ptrTemp, i, j, (unsigned int)imgIn->get_nrows(), (unsigned int)imgIn->get_ncols(),
+				(unsigned int)imgOut->get_nrows(), (unsigned int)imgOut->get_ncols(),
+				filmGrainOptions.grainSeed, NmonteCarlo, grainRadius,grainStd,sigmaConv,filmGrainOptions.xA, filmGrainOptions.yA,
+				filmGrainOptions.xB, filmGrainOptions.yB);
+			
+			imgOut->set_value(i,j,pixTemp);
+		}
+	}
+	return(imgOut);
+}
+
+
+
+/**************************************************/
+/************   GRAIN-WISE ALGORITHM   ************/
+/**************************************************/
+
+matrix<float>* film_grain_rendering_grain_wise(matrix<float> *imgIn,
+	filmGrainOptionsStruct<float> filmGrainOptions)
+{
+	float lambda, epsilon, E;
+
+	/*********************************************/
+	/***************   PARAMETERS   **************/
+	/*********************************************/
+
+	epsilon = 1e-3;
+	//parameters for film grain
+    float grainRadius = filmGrainOptions.r;//grainRadius/pixelSize;
+    //grainRadius = sqrt((4*pi)/(3.0*sqrt(3.0)))*grainRadius;
+    float grainStd = filmGrainOptions.grainStd;
+    float grainVar = grainStd*grainStd;//grainRadius;
+	std::string grainType = filmGrainOptions.grainShape;
+	std::string distributionType = filmGrainOptions.grainDistribution;
+	float sigmaConv = filmGrainOptions.sigmaConv;
+ 	float sX = ((float)filmGrainOptions.nOut)/((float)(filmGrainOptions.xB-filmGrainOptions.xA)); 
+	float sY = ((float)filmGrainOptions.mOut)/((float)(filmGrainOptions.yB-filmGrainOptions.yA));
+	std::cout<< "sX : " << sX << std::endl;
+	std::cout<< "sY : " << sY << std::endl;
+
+	std::cout << "min : " << imgIn->min() << std::endl;
+	std::cout << "max : " << imgIn->max() << std::endl;
+
+	/*********************************************/
+	/***   MONTE CARLO TRANSLATION VECTORS   *****/
+	/*********************************************/
+
+	int NmonteCarlo = filmGrainOptions.NmonteCarlo;
+	std::random_device rd;
+    std::mt19937 rndGenerator(rd());
+
+	//draw the random (gaussian) translation vectors
+    matrix<float> * X = new matrix<float>(NmonteCarlo,1);
+    matrix<float> * Y = new matrix<float>(NmonteCarlo,1);
+	noise_prng pMonteCarlo;
+	mysrand(&pMonteCarlo, 2016u*(filmGrainOptions.grainSeed));
+	for (int i=0; i<NmonteCarlo; i++)
+	{
+		X->set_value(i,0,sigmaConv*(float)myrand_gaussian_0_1(&pMonteCarlo));   //(float)normalDistribution(rndGenerator)
+		Y->set_value(i,0,sigmaConv*(float)myrand_gaussian_0_1(&pMonteCarlo));
+	}
+
+	//get maximum grey-level
+	float maxGreyLevel = 1;//imgIn->max();
+
+	//optionally, save the image of values of lambda
+	matrix<float> *imgLambda = new matrix<float>(imgIn->get_nrows(),imgIn->get_ncols());
+	//create output image
+	matrix<float> *imgOut = new matrix<float>( filmGrainOptions.mOut, filmGrainOptions.nOut );
+	imgOut->set_to_zero();
+	//create list of temporary images, and set them to 0. We use these to store the result of each Monte Carlo evaluation
+	matrix<bool>** imgTempPtr = new matrix<bool>* [NmonteCarlo];
+	for (int i=0; i<NmonteCarlo; i++)
+	{
+		imgTempPtr[i] = new matrix<bool>( filmGrainOptions.mOut, filmGrainOptions.nOut);
+		(imgTempPtr[i])->set_to_zero();
+	}
+
+	//determine grain centres for the whole image
+	matrix<float> *modelTemp;
+	int i,j,k,x,y,minBBx,maxBBx,minBBy,maxBBy, nGrain;
+	float yGrainTemp,xGrainTemp,rGrainTemp,rGrainTempSq;
+
+	#pragma omp parallel for private(i,j,k,E,lambda,modelTemp,x,y,minBBx,maxBBx,minBBy,maxBBy,yGrainTemp,xGrainTemp,rGrainTemp,rGrainTempSq,nGrain) shared(imgTempPtr)
+	for (i=(int)floor(filmGrainOptions.yA); i<= (int)ceil(filmGrainOptions.yB); i++)
+	{
+		for (j=(int)floor(filmGrainOptions.xA); j<= (int)ceil(filmGrainOptions.xB); j++)
+		{
+			//determine lambda
+		    E = ((*imgIn)(i,j))/(maxGreyLevel+epsilon);
+		    lambda = 1/(grain_measure(grainType,grainRadius,grainVar))*log(1/(1-E));
+		    modelTemp = boolean_model(lambda,grainRadius,grainStd,distributionType,j,i, filmGrainOptions.grainSeed);
+	
+			//for each image of the monte carlo simulation
+			for (k=0; k<NmonteCarlo; k++)
+			{
+				//add this grain to the kth image
+				for (nGrain=0; nGrain< modelTemp->get_nrows(); nGrain++)
+				{
+					//get the current grain info, in the INPUT image coordinate system
+					xGrainTemp = ( (*modelTemp)(nGrain, 0) + j) - (*X)(k,0)/sX;
+					yGrainTemp = ( (*modelTemp)(nGrain, 1) + i) - (*Y)(k,0)/sY;
+					rGrainTemp = (*modelTemp)(nGrain, 2);
+					rGrainTempSq = rGrainTemp*rGrainTemp;
+					//cells to check, in the OUTPUT image coordinate system
+					minBBx = (int) ceil( (float)  ( xGrainTemp*sX -(float)rGrainTemp*sX) );
+					maxBBx = (int) floor( (float) ( xGrainTemp*sX +(float)rGrainTemp*sX) );
+					minBBy = (int) ceil( (float)  ( yGrainTemp*sY -(float)rGrainTemp*sY) );
+					maxBBy = (int) floor( (float) ( yGrainTemp*sY +(float)rGrainTemp*sY) );
+
+					//loop over bounding boxes for each grain
+					for (x=minBBx; x<=maxBBx; x++)
+					{
+						for (y=minBBy; y<=maxBBy; y++)
+						{
+							//check if the coordinates (x,y) are in the bounds of the output image
+							if ( ((float)y - floor( (filmGrainOptions.yA) *sY) >= 0) &&
+								 ((float)y - floor( (filmGrainOptions.yA) *sY) < imgOut->get_nrows() ) &&
+								 ((float)x  - floor( (filmGrainOptions.xA) *sX) >=0 ) &&
+								 ((float)x  - floor( (filmGrainOptions.xA) *sX) < imgOut->get_ncols() )
+								 )
+							{
+								if (  ( ( ( (float)y/sY)-yGrainTemp)*( ( (float)y/sY)-yGrainTemp) +
+									( ( (float)x/sX) -xGrainTemp)*( ( (float)x/sX)-xGrainTemp)  <= rGrainTempSq) == true)
+								{
+								    (imgTempPtr[k])->set_value( (int)( (float)y - floor( (filmGrainOptions.yA) *sY)),
+								    (int)fmin(fmax( (float)x  - floor( (filmGrainOptions.xA) *sX) , 0),imgOut->get_ncols()-1), (bool) 1 );
+								}
+							}
+						}
+					}
+				}
+			}
+			//save lambda
+			imgLambda->set_value(i,j,lambda);
+			delete modelTemp;
+		}
+		//std::cout << "i : " << i << std::endl;
+	}
+
+	//copy the information to the output image
+	for (int i=0; i< imgOut->get_nrows(); i++)
+	{
+		for (int j=0; j< imgOut->get_ncols(); j++)
+		{
+			float valTemp = (float)0.0;
+			for (int k=0; k<NmonteCarlo; k++)
+			{
+				valTemp = valTemp + (float)( (*(imgTempPtr[k]))(i,j) );
+			}
+			imgOut->set_value(i , j , valTemp );//imgOut->set_value(i , j , imgLambda->get_value(i,j) );//
+		}
+	}
+
+	imgOut->divide((float)NmonteCarlo);
+
+	delete imgLambda;
+	//delete temporary images
+	for (int i=0; i<NmonteCarlo; i++)
+	{
+		delete imgTempPtr[i];
+	}
+	delete imgTempPtr;
+	return(imgOut);
+}
+
