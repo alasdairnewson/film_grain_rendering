@@ -3,7 +3,7 @@ BIN_DIR   = bin
 OBJ_DIR   = obj
 SRC_DIR   = src
 LIB_DIR   = lib
-CXXOPT    = -O3 -ftree-vectorize -funroll-loops#
+CXXOPT    = -O2 -ftree-vectorize -funroll-loops#
 CXXFLAGS  =  -std=c++11 -Wall -Wextra # -g # 
 INCPATH   = -Isrc -I/usr/local/include/
 LDFLAGS   = -lpng -ltiff

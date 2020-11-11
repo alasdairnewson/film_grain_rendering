@@ -89,7 +89,7 @@ int choose_rendering_algorithm(const std::string& inputFile, float muR, float si
 * @param x2, y2 : x, y coordinates of the second point
 * @return squared Euclidean distance
 */
-float sqDistance(const float x1, const float y1, const float x2, const float y2)
+double sqDistance(const double x1, const double y1, const double x2, const double y2)
 {
 	return((x1-x2)*(x1-x2) + (y1-y2)*(y1-y2));
 }
@@ -160,32 +160,34 @@ float render_pixel(float *imgIn, int yOut, int xOut, unsigned int mIn, unsigned 
 		float yGaussian = yIn + sigmaFilter*(yGaussianList[i])/sY;
 
 		//determine the bounding boxes around the current shifted pixel
-		int minX = floor( (xGaussian - maxRadius)/ag);
-		int maxX = floor( (xGaussian + maxRadius)/ag);
-		int minY = floor( (yGaussian - maxRadius)/ag);
-		int maxY = floor( (yGaussian + maxRadius)/ag);
+		// this was where the floating point precision was insufficient (for the additions and subtractions)
+		unsigned int minX = (unsigned int)floor( ( (double)xGaussian - (double)maxRadius)/((double)ag));
+		unsigned int maxX = (unsigned int)floor( ( (double)xGaussian + (double)maxRadius)/((double)ag));
+		unsigned int minY = (unsigned int)floor( ( (double)yGaussian - (double)maxRadius)/((double)ag));
+		unsigned int maxY = (unsigned int)floor( ( (double)yGaussian + (double)maxRadius)/((double)ag));
 
 		bool ptCovered = false; // used to break all for loops
-		for(int ncx = minX; ncx <= maxX; ncx++) /* x-cell number */
+		for(unsigned int ncx = minX; ncx <= maxX; ncx++) /* x-cell number */
 		{
 			if(ptCovered == true)
 				break;
-			for(int ncy = minY; ncy <= maxY; ncy++) /* y-cell number */
+			for(unsigned int ncy = minY; ncy <= maxY; ncy++) /* y-cell number */
 			{
 				if(ptCovered == true)
 					break;
 				// cell corner in pixel coordinates
-				vec2d cellCorner;
-				cellCorner.x = ag*ncx;
-				cellCorner.y = ag*ncy;
+				// note : we put everything to do with the cell positions to double precision, because
+				// there can be MANY of them (depending on the grain size), and floating point precision is not sufficient
+				double cellCornerX = ((double)ag)*((double)ncx);
+		        double cellCornerY = ((double)ag)*((double)ncy);
 
 				/* seed cell = (x/w, y/w) */
 				unsigned int seed = cellseed(ncx,ncy, offset);
 				mysrand(&p, seed);
 
 				// Compute the Poisson parameters for the pixel that contains (x,y)
-				float u = imgIn[  (unsigned int)(fmin(fmax(floor(cellCorner.y),0.0),(float)(mIn-1)))*nIn+
-							(unsigned int)(fmin(fmax(floor(cellCorner.x),0.0),(float)(nIn-1)))];
+				float u = imgIn[  (unsigned int)(fmin(fmax(floor(cellCornerY),0.0),(float)(mIn-1)))*nIn+
+				(unsigned int)(fmin(fmax(floor(cellCornerX),0.0),(float)(nIn-1)))];
 				int uInd = (int)floor(u*((float)(MAX_GREY_LEVEL+EPSILON_GREY_LEVEL)));
 				float currLambda = lambdaList[uInd];
 				float currExpLambda = expLambdaList[uInd];
@@ -195,8 +197,8 @@ float render_pixel(float *imgIn, int yOut, int xOut, unsigned int mIn, unsigned 
         		for(unsigned int k=0; k<Ncell; k++)
         		{
 					//draw the grain centre
-					float xCentreGrain = cellCorner.x + ag*myrand_uniform_0_1(&p);
-					float yCentreGrain = cellCorner.y + ag*myrand_uniform_0_1(&p);
+					double xCentreGrain = cellCornerX + ((double)ag)*((double)myrand_uniform_0_1(&p));
+			        double yCentreGrain = cellCornerY + ((double)ag)*((double)myrand_uniform_0_1(&p));
 
 					//draw the grain radius
 					if (sigmaR>0.0)
@@ -213,7 +215,7 @@ float render_pixel(float *imgIn, int yOut, int xOut, unsigned int mIn, unsigned 
 					}
 
 					// test distance
-					if(sqDistance(xCentreGrain,yCentreGrain, xGaussian,yGaussian) < currGrainRadiusSq)
+					if(sqDistance(xCentreGrain,yCentreGrain, xGaussian,yGaussian) < (double)currGrainRadiusSq)
 					{
 						pixOut = pixOut+(float)1.0;
 						ptCovered = true;
@@ -272,8 +274,8 @@ matrix<float>* film_grain_rendering_pixel_wise(matrix<float> *imgIn, filmGrainOp
 	}
 
 	//pre-calculate lambda and exp(-lambda) for each possible grey-level
-	float *lambdaList = new float[ MAX_GREY_LEVEL ];
-	float *expLambdaList = new float[ MAX_GREY_LEVEL ];
+	float *lambdaList = new float[ MAX_GREY_LEVEL +1];
+	float *expLambdaList = new float[ MAX_GREY_LEVEL +1];
 	for (int i=0; i<=MAX_GREY_LEVEL; i++)
 	{
 		float u = ((float)i)/( (float) ( (float)MAX_GREY_LEVEL + (float)EPSILON_GREY_LEVEL) );

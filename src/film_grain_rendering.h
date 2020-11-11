@@ -45,7 +45,7 @@
 	matrix<float>* boolean_model(float lambda, float r, float stdGrain);
 
 	int choose_rendering_algorithm(const std::string& inputFile, float muR, float sigmaR);
-	float sqDistance(const float x1, const float y1, const float x2, const float y2);
+	double sqDistance(const double x1, const double y1, const double x2, const double y2);
 	float render_pixel(float *imgIn, int yOut, int xOut, unsigned int mIn, unsigned int nIn, unsigned int mOut, unsigned int nOut,
 	unsigned int offset, unsigned int nMonteCarlo, float grainRadius, float grainSigma, float sigmaFilter,
 	float xA, float yA, float xB, float yB, float *lambdaList,
